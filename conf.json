@@ -1,10 +1,10 @@
 {
   "image_folder": "./tmp",
-  "model_token": "AIzaSyCcDKcYGzdsCi68FualKxgPuMlPQzFOeyU",
+  "model_token": "xxx",
   "llm_type": "gemini",
   "model_custom_url": "",
   "git_hub_repo_url": "yincongcyincong/PhotoClassifier",
-  "github_token": "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",
+  "github_token": "ghp_xxx",
   "github_dir": "photos",
   "target_classes": "萝莉,JK,御姐,自拍,表情包,性感",
   "model_name": "gemini-2.0-flash",
