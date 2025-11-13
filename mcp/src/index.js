@@ -69,8 +69,6 @@ async function fetchGitHubImages(path) {
                 if (isImage && item.download_url) {
                     // 获取图片的上一级目录名作为类别
                     const pathSegments = item.path.split('/');
-                    // pathSegments 示例: ['images', 'fruits', 'apple.png']
-                    // categoryName 应该是 'fruits'
                     const categoryName = pathSegments[pathSegments.length - 2];
 
                     if (categoryName && categoryName !== GITHUB_PATH) {
@@ -78,7 +76,6 @@ async function fetchGitHubImages(path) {
                             imageStore[categoryName] = [];
                         }
 
-                        // 存储图片链接，ID 为当前类别中的 1-based 索引
                         imageStore[categoryName].push({
                             id: imageStore[categoryName].length + 1,
                             url: item.download_url
@@ -96,7 +93,7 @@ async function fetchGitHubImages(path) {
 
 const IMAGE_LOOKUP_TOOL = {
     name: "get_image_link",
-    description: "Retrieves a public raw image URL by category (parent directory name) and ID (index within the category list).",
+    description: "Retrieves multiple public image URLs by category and number of image.",
     inputSchema: {
         type: "object",
         properties: {
@@ -104,12 +101,12 @@ const IMAGE_LOOKUP_TOOL = {
                 type: "string",
                 description: "The name of the category, which is the immediate parent directory name of the image.",
             },
-            id: {
+            num: {
                 type: "integer",
-                description: "The 1-based index (ID) of the image within the specified category.",
+                description: "the number of the image within the category list.",
             }
         },
-        required: ["category", "id"],
+        required: ["category"],
     }
 };
 
@@ -118,9 +115,9 @@ const TOOLS = [IMAGE_LOOKUP_TOOL];
 /**
  * 实际执行图片链接查找逻辑的函数。
  * @param {string} category 图片类别（上级目录名）
- * @param {number} id 图片在类别中的 1-based ID
+ * @param {number} num 获取的图片数量
  */
-async function getImageLink(category, id) {
+async function getImageLink(category, num) {
     if (!isStoreInitialized) {
         return {
             content: [{
@@ -142,25 +139,22 @@ async function getImageLink(category, id) {
         };
     }
 
-    // 将 1-based ID 转换为 0-based 索引
-    const imageIndex = id - 1;
-    const imageEntry = categoryData[imageIndex];
-
-    if (!imageEntry) {
-        return {
-            content: [{
+    const res = [];
+    const idxMap = new Map();
+    while (idxMap.size < num) {
+        const chooseIdx = Math.floor(Math.random() * (categoryData.length + 1))
+        if (!idxMap.has(chooseIdx)) {
+            idxMap.set(chooseIdx, true);
+            res.push({
                 type: "text",
-                text: `Error: Image ID ${id} not found in category '${category}'. IDs are 1-based. Max ID is ${categoryData.length}.`
-            }],
-            isError: true
-        };
+                text: categoryData[chooseIdx].url + " \n\n "
+            });
+        }
     }
 
+
     return {
-        content: [{
-            type: "text",
-            text: imageEntry.url
-        }],
+        content: res,
         isError: false
     };
 }
@@ -187,16 +181,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
         switch (request.params.name) {
             case "get_image_link": {
-                const {category, id} = request.params.arguments;
+                const {category, num} = request.params.arguments;
                 // 确保 ID 是一个数字
-                const numericId = parseInt(id);
-                if (isNaN(numericId) || numericId < 1) {
-                    return {
-                        content: [{type: "text", text: "Error: ID must be a positive integer."}],
-                        isError: true
-                    };
+                let numericNum = parseInt(num);
+                if (isNaN(numericNum) || numericNum < 1) {
+                    numericNum = 1;
                 }
-                return await getImageLink(category, numericId);
+                return await getImageLink(category, numericNum);
             }
             default:
                 return {
