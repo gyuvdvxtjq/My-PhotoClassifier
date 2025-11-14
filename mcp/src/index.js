@@ -4,90 +4,75 @@ import {StdioServerTransport} from "@modelcontextprotocol/sdk/server/stdio.js";
 import {CallToolRequestSchema, ListToolsRequestSchema} from "@modelcontextprotocol/sdk/types.js";
 import fetch from "node-fetch";
 
-// --- 配置常量 (请通过环境变量或直接修改来设置您的 GitHub 仓库信息) ---
-// GitHub 仓库拥有者
-const GITHUB_OWNER = process.env.GITHUB_OWNER || "example-owner";
-// GitHub 仓库名称
-const GITHUB_REPO = process.env.GITHUB_REPO || "example-repo";
-// 仓库中图片所在的根目录路径 (例如: 'assets/images')
-const GITHUB_PATH = process.env.GITHUB_PATH || "images";
-// GitHub Personal Access Token (可选，用于提高 API 速率限制，或访问私有仓库)
+// --- 配置常量 (请通过环境变量或直接修改来设置您的 GitHub 文件信息) ---
+
+// **必需**: GitHub 上 JSON 文件的 Raw URL。
+// 格式应为：https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path/to/file.json>
+const GITHUB_FILE_URL = process.env.GITHUB_FILE_URL || "https://raw.githubusercontent.com/example/repo/main/image_links.json";
+
+// GitHub Personal Access Token (可选，如果文件在私有仓库)
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 
-// GitHub API 基础 URL
-const GITHUB_API_BASE = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents`;
 
 /**
- * In-memory 存储图片链接，按类别（上级目录名）分类。
- * 结构示例:
+ * In-memory 存储图片链接。
+ * 结构:
  * {
- * "category_name": [
- * { id: 1, url: "raw_image_url_1" },
- * { id: 2, url: "raw_image_url_2" }
- * ],
- * "another_category": [ ... ]
+ * "类型名称": ["http://url1.com", "http://url2.com"],
+ * "另一种类型": ["http://url3.com"],
  * }
  */
 const imageStore = {};
 let isStoreInitialized = false;
 
-// 常见图片文件扩展名
-const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
 
 /**
- * 递归地从 GitHub API 获取目录内容，并填充 imageStore。
- * @param {string} path 当前要扫描的路径
+ * 从指定的 GitHub Raw URL 获取 JSON 文件内容并解析，然后填充 imageStore。
  */
-async function fetchGitHubImages(path) {
-    const url = `${GITHUB_API_BASE}/${path}`;
+async function fetchAndParseJsonFile() {
+    const url = GITHUB_FILE_URL;
     const headers = {
-        'Accept': 'application/vnd.github.v3+json',
-        'User-Agent': 'MCP-GitHub-Image-Server'
+        'Accept': 'application/json',
+        'User-Agent': 'MCP-GitHub-Json-Server'
     };
     if (GITHUB_TOKEN) {
+        // 通常 Raw URL 不需要 token，但如果仓库是私有的，则需要
         headers['Authorization'] = `token ${GITHUB_TOKEN}`;
     }
 
     try {
+        console.error(`Fetching JSON file from: ${url}`);
         const response = await fetch(url, {headers});
+
         if (!response.ok) {
-            throw new Error(`GitHub API returned status ${response.status}: ${await response.text()}`);
-        }
-        const contents = await response.json();
-
-        if (!Array.isArray(contents)) {
-            console.error(`Error: Expected an array for path ${path}, but got: ${JSON.stringify(contents)}`);
-            return;
+            // 检查常见的 404/403 错误
+            throw new Error(`Failed to fetch file. Status: ${response.status}. Check GITHUB_FILE_URL.`);
         }
 
-        for (const item of contents) {
-            if (item.type === 'dir') {
-                // 递归处理子目录
-                await fetchGitHubImages(item.path);
-            } else if (item.type === 'file') {
-                const isImage = IMAGE_EXTENSIONS.some(ext => item.name.toLowerCase().endsWith(ext));
-                if (isImage && item.download_url) {
-                    // 获取图片的上一级目录名作为类别
-                    const pathSegments = item.path.split('/');
-                    const categoryName = pathSegments[pathSegments.length - 2];
+        const fileContent = await response.json();
 
-                    if (categoryName && categoryName !== GITHUB_PATH) {
-                        if (!imageStore[categoryName]) {
-                            imageStore[categoryName] = [];
-                        }
+        // 验证解析后的内容是否为预期的对象格式
+        if (typeof fileContent !== 'object' || fileContent === null || Array.isArray(fileContent)) {
+            throw new Error("Parsed content is not a valid JSON object map.");
+        }
 
-                        imageStore[categoryName].push({
-                            id: imageStore[categoryName].length + 1,
-                            url: item.download_url
-                        });
-                    }
-                }
+        // 遍历并加载数据
+        for (const [category, links] of Object.entries(fileContent)) {
+            if (Array.isArray(links) && links.every(link => typeof link === 'string')) {
+                // 确保类别名称不为空，并且链接是字符串数组
+                imageStore[category] = links;
+            } else {
+                console.error(`Warning: Skipping category '${category}'. Links must be an array of strings.`);
             }
         }
+
     } catch (error) {
-        console.error(`Failed to fetch GitHub content for path ${path}: ${error.message}`);
+        console.error(`Fatal Error: Could not load data from GitHub JSON file. Details: ${error.message}`);
+        // 清空 store，确保 isStoreInitialized 为 false 的逻辑能起作用
+        Object.keys(imageStore).forEach(key => delete imageStore[key]);
     }
 }
+
 
 // --- MCP 工具定义 ---
 
@@ -99,11 +84,12 @@ const IMAGE_LOOKUP_TOOL = {
         properties: {
             category: {
                 type: "string",
-                description: "The name of the category, which is the immediate parent directory name of the image.",
+                description: "The name of the category, which corresponds to a key in the loaded JSON file.",
             },
             num: {
                 type: "integer",
-                description: "the number of the image within the category list.",
+                description: "The number of image links to retrieve from the category. Default is 1.",
+                minimum: 1,
             }
         },
         required: ["category"],
@@ -114,15 +100,18 @@ const TOOLS = [IMAGE_LOOKUP_TOOL];
 
 /**
  * 实际执行图片链接查找逻辑的函数。
- * @param {string} category 图片类别（上级目录名）
+ * @param {string} category 图片类别名称
  * @param {number} num 获取的图片数量
  */
 async function getImageLink(category, num) {
+    // num 默认值为 1
+    const count = Math.max(1, num || 1);
+
     if (!isStoreInitialized) {
         return {
             content: [{
                 type: "text",
-                text: "Error: Image store is not yet initialized. Please wait for the server to load images."
+                text: "Error: Image store is not yet initialized. Please check the server logs for loading errors."
             }],
             isError: true
         };
@@ -140,25 +129,32 @@ async function getImageLink(category, num) {
     }
 
     const res = [];
-    if (num > categoryData.length) {
-        for (let i = 0; i < categoryData.length; i++) {
+    // 实际获取的数量
+    const actualCount = Math.min(count, categoryData.length);
+
+    // 如果请求的数量大于实际可用数量，或者请求多个，则进行随机选取（带有去重逻辑）
+    if (actualCount === categoryData.length || actualCount > 1) {
+        const idxSet = new Set();
+        while (idxSet.size < actualCount) {
+            // 在 [0, categoryData.length - 1] 范围内随机选择索引
+            const chooseIdx = Math.floor(Math.random() * categoryData.length);
+            idxSet.add(chooseIdx);
+        }
+
+        for (const idx of idxSet) {
             res.push({
                 type: "text",
-                text: categoryData[i].url + "\n"
+                text: categoryData[idx] + "\n"
             });
         }
+
     } else {
-        const idxMap = new Map();
-        while (idxMap.size < num) {
-            const chooseIdx = Math.floor(Math.random() * (categoryData.length + 1))
-            if (!idxMap.has(chooseIdx)) {
-                idxMap.set(chooseIdx, true);
-                res.push({
-                    type: "text",
-                    text: categoryData[chooseIdx].url + "  "
-                });
-            }
-        }
+        // 只请求 1 个链接时，直接随机选取 1 个
+        const chooseIdx = Math.floor(Math.random() * categoryData.length);
+        res.push({
+            type: "text",
+            text: categoryData[chooseIdx] + "\n"
+        });
     }
 
     return {
@@ -171,7 +167,7 @@ async function getImageLink(category, num) {
 // --- MCP 服务器设置与运行 ---
 
 const server = new Server({
-    name: "mcp-server/github-image-lookup",
+    name: "mcp-server/github-json-lookup",
     version: "1.0.0",
 }, {
     capabilities: {
@@ -190,7 +186,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         switch (request.params.name) {
             case "get_image_link": {
                 const {category, num} = request.params.arguments;
-                // 确保 ID 是一个数字
+                // 确保 num 是一个有效的数字，默认为 1
                 let numericNum = parseInt(num);
                 if (isNaN(numericNum) || numericNum < 1) {
                     numericNum = 1;
@@ -218,31 +214,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 async function runServer() {
-    console.error(`Starting image retrieval from GitHub... Path: ${GITHUB_PATH}`);
+    console.error(`Starting data retrieval from GitHub JSON file: ${GITHUB_FILE_URL}`);
 
-    // 1. 初始化图片仓库数据
-    await fetchGitHubImages(GITHUB_PATH);
+    // 1. 初始化数据仓库
+    await fetchAndParseJsonFile();
 
     // 2. 标记初始化完成并打印统计信息
-    isStoreInitialized = true;
     const totalCategories = Object.keys(imageStore).length;
     const totalImages = Object.values(imageStore).reduce((sum, arr) => sum + arr.length, 0);
 
-    console.error(`GitHub Image Store Initialized.`);
-    console.error(`Total Categories Loaded: ${totalCategories}`);
-    console.error(`Total Images Loaded: ${totalImages}`);
-
+    // 只有在成功加载到数据时才标记初始化完成
     if (totalCategories > 0) {
+        isStoreInitialized = true;
+        console.error(`GitHub Image Store Initialized Successfully.`);
+        console.error(`Total Categories Loaded: ${totalCategories}`);
+        console.error(`Total Images Loaded: ${totalImages}`);
         console.error(`Example Categories: ${Object.keys(imageStore).slice(0, 5).join(', ')}`);
     } else {
-        console.error("Warning: No images were loaded. Check your GITHUB_OWNER, GITHUB_REPO, GITHUB_PATH, and GITHUB_TOKEN configuration, and ensure the directory contains subdirectories with image files.");
+        isStoreInitialized = false;
+        console.error("Warning: No data was loaded. Check your GITHUB_FILE_URL and ensure the file exists and has the correct JSON format.");
     }
 
 
     // 3. 连接 MCP 传输层
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error("GitHub Image Lookup MCP Server running on stdio");
+    console.error("GitHub JSON Lookup MCP Server running on stdio");
 }
 
 runServer().catch((error) => {
