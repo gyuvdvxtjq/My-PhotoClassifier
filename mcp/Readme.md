@@ -9,42 +9,35 @@
 * **Node.js 和 npm/npx:** 用于运行脚本和执行命令行工具。
 * **Git:** 如果您需要克隆或与 GitHub 仓库进行更复杂的交互。
 
-### 2. 获取 GitHub 个人访问令牌（Personal Access Token, PAT）
 
-为了让脚本能够访问您的私有仓库或避免公共仓库的速率限制，您需要一个 GitHub 令牌。
+### 2. 命令参数说明
 
-1. 访问您的 GitHub **Settings**。
-2. 导航到 **Developer settings** -\> **Personal access tokens** -\> **Tokens (classic)**。
-3. 点击 **Generate new token**。
-4. 确保您的令牌具有访问目标仓库所需的权限（例如，如果仓库是私有的，您至少需要 `repo` 权限）。
-5. **请妥善保管好生成的令牌，它只会显示一次！**
+| 环境变量/参数           | 示例值                                                                                 | 说明                              |
+|:------------------|:------------------------------------------------------------------------------------|:--------------------------------|
+| `GITHUB_FILE_URL` | `https://raw.githubusercontent.com/yincongcyincong/PhotoClassifier/main/class.json` | **必填。** json文件                  |
+| `GITHUB_TOKEN`    | `xxx`                                                                               | **选填。** 您的 GitHub 个人访问令牌 (PAT)。 |
 
-### 3. 命令参数说明
 
-| 环境变量/参数        | 示例值               | 说明                              |
-|:---------------|:------------------|:--------------------------------|
-| `GITHUB_OWNER` | `yincongcyincong` | **必填。** GitHub 仓库的所有者（用户名或组织名）。 |
-| `GITHUB_REPO`  | `PhotoClassifier` | **必填。** 目标 GitHub 仓库的名称。        |
-| `GITHUB_PATH`  | `photos`          | **必填。** 目标仓库中要处理的文件夹或文件路径。      |
-| `GITHUB_TOKEN` | `xxx`             | **必填。** 您的 GitHub 个人访问令牌 (PAT)。 |
+### 3. 配置格式
+```
+{
+  "性感": [
+    "https://raw.githubusercontent.com/yincongcyincong/PhotoClassifier/main/photos/%E6%80%A7%E6%84%9F/0.jpg",
+  ],
+  "JK": [
+    "https://raw.githubusercontent.com/yincongcyincong/PhotoClassifier/main/photos/JK/0.jpg",
+  ]
+}
 
-### 4. 核心逻辑 (node src/index.js)
-
-脚本 **`src/index.js`** 将会：
-
-1. 读取传入的环境变量，获取 **`GITHUB_OWNER`**, **`GITHUB_REPO`**, **`GITHUB_PATH`**, 和 **`GITHUB_TOKEN`**。
-2. 使用 `GITHUB_TOKEN` 认证，连接到 `yincongcyincong/PhotoClassifier` 仓库。
-3. 对仓库中的图片链接加载到内存中，配合脚本使用
+```
 
 ### 测试
 
 ```
 npx @modelcontextprotocol/inspector \
--e GITHUB_OWNER="yincongcyincong" \
--e GITHUB_REPO="PhotoClassifier" \
--e GITHUB_PATH="photos" \
--e GITHUB_TOKEN="xxx" \
-node src/index.js
+ -e GITHUB_FILE_URL="https://raw.githubusercontent.com/yincongcyincong/PhotoClassifier/main/class.json?v=1" \
+ -e GITHUB_TOKEN="xxx" \
+ node src/index.js
 
 ```
 
@@ -56,6 +49,7 @@ node src/index.js
 创建 PAT。**在权限 (Scopes) 中，必须勾选 `repo` 权限，以确保程序有权限向您的仓库写入文件。**
 
 ## 上传npx
+
 ```
 npm init
 

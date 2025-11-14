@@ -1,6 +1,6 @@
 {
   "name": "photoclassifier",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "npm login",
   "main": "mcp/src/index.js",
   "scripts": {
