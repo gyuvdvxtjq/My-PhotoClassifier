@@ -16,8 +16,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	
+
+	"golang.org/x/time/rate"
 	"google.golang.org/genai"
+)
+
+const (
+	progressFile = "progress.json"
 )
 
 var (
@@ -30,16 +35,18 @@ var (
 
 // Config 存储所有必要的输入参数
 type Config struct {
-	ImageFolder     string `json:"image_folder"`
-	ModelToken      string `json:"model_token"`      // API Key
-	LLMType         string `json:"llm_type"`         // gemini / openai
-	ModelCustomURL  string `json:"model_custom_url"` // 如果模型有自定义地址
-	Dir             string `json:"dir"`              // 的目录
-	TargetClasses   string `json:"target_classes"`   // 目标图片类别列表 (逗号分隔)
-	ModelName       string `json:"model_name"`       // 模型名称
-	ProxyURL        string `json:"proxy_url"`        // 代理地址 (可选)
-	ClassIdx        string `json:"class_idx"`        // 分类索引 (可选)
-	IntervalSeconds int    `json:"interval_seconds"` // 间隔时间 (秒)
+	ImageFolder              string `json:"image_folder"`
+	ModelToken               string `json:"model_token"`      // API Key
+	LLMType                  string `json:"llm_type"`         // gemini / openai
+	ModelCustomURL           string `json:"model_custom_url"` // 如果模型有自定义地址
+	Dir                      string `json:"dir"`              // 的目录
+	TargetClasses            string `json:"target_classes"`   // 目标图片类别列表 (逗号分隔)
+	ModelName                string `json:"model_name"`       // 模型名称
+	ProxyURL                 string `json:"proxy_url"`        // 代理地址 (可选)
+	ClassIdx                 string `json:"class_idx"`        // 分类索引 (可选)
+	IntervalSeconds          int    `json:"interval_seconds"` // 间隔时间 (秒)
+	RateLimitCount           int    `json:"rate_limit_count"`
+	RateLimitDurationMinutes int    `json:"rate_limit_duration_minutes"`
 }
 
 // --- 2. GitHub API 结构体 ---
@@ -63,7 +70,14 @@ func ClassifyAndUpload(cfg Config) {
 	if cfg.ImageFolder == "" || cfg.ModelToken == "" || cfg.LLMType == "" {
 		log.Fatal("错误：缺少必要的参数 (如文件夹、API Token 或 GitHub Token/RepoURL)。请使用 -h 查看用法。")
 	}
-	
+
+	// 加载处理进度
+	processedFiles, err := loadProgress(progressFile)
+	if err != nil {
+		log.Fatalf("无法加载进度文件: %v", err)
+	}
+	fmt.Printf("已加载 %d 个已处理文件的记录。\n", len(processedFiles))
+
 	prompt := fmt.Sprintf(`
 你是一个专业的图片内容识别和分类系统。你的任务是根据提供的图片，从限定的分类列表中选出最相关的标签。
 
@@ -90,67 +104,84 @@ func ClassifyAndUpload(cfg Config) {
 如果你识别到图片内容只属于“风景”一个类别，则返回：
 {"cate":["风景"]}
 `, cfg.TargetClasses)
-	
+
 	// 初始化 Gemini 客户端
 	ctx := context.Background()
-	
+
 	// 遍历文件夹
 	files, err := ioutil.ReadDir(cfg.ImageFolder)
 	if err != nil {
 		log.Fatalf("无法读取文件夹 %s: %v", cfg.ImageFolder, err)
 	}
-	
+
 	if len(files) == 0 {
 		log.Printf("文件夹 %s 中没有找到文件，程序退出。\n", cfg.ImageFolder)
 		return
 	}
-	
+
+	// 设置速率限制器
+	limit := rate.Every(time.Duration(cfg.RateLimitDurationMinutes) * time.Minute / time.Duration(cfg.RateLimitCount))
+	limiter := rate.NewLimiter(limit, 1)
+
 	for _, file := range files {
 		if file.IsDir() {
 			continue
 		}
-		
+
+		// 断点续传：检查文件是否已处理
+		if processedFiles[file.Name()] {
+			fmt.Printf("跳过已处理的文件: %s\n", file.Name())
+			continue
+		}
+
 		filePath := filepath.Join(cfg.ImageFolder, file.Name())
-		
+
 		// 确保是图片文件 (简单检查)
 		if !isImageFile(file.Name()) {
 			log.Printf("跳过文件 %s: 不是图片文件\n", file.Name())
 			continue
 		}
-		
+
 		fmt.Printf("\n--- 正在处理图片: %s ---\n", file.Name())
-		
+
 		imgData, err := ioutil.ReadFile(filePath)
 		if err != nil {
 			log.Printf("无法读取文件 %s: %v", filePath, err)
 			continue
 		}
-		
+
+		// 等待速率限制器允许
+		err = limiter.Wait(ctx)
+		if err != nil {
+			log.Printf("速率限制器错误: %v", err)
+			continue
+		}
+
 		// 1. 调用大模型进行识别和分类
 		categories, token, err := classifyImageWithModel(ctx, imgData, prompt)
 		if err != nil {
 			log.Printf("分类图片 %s 失败: %v", file.Name(), err)
 			continue
 		}
-		
+
 		fmt.Printf("图片%s  -> 模型返回的分类标签: %s\n, 使用token: %d", filePath, categories, token)
-		
+
 		// 如果未识别到类别，跳过
 		if len(categories) == 0 {
 			fmt.Printf("  -> 模型未返回有效分类标签，跳过上传。\n")
 			continue
 		}
-		
+
 		// 2. 将图片上传到 GitHub
 		for _, cat := range categories {
 			// 清理类别名称以用于文件路径 (例如：移除空格、斜杠等)
 			safeCat := sanitizeCategory(cat)
 			fmt.Printf("  -> 识别类别: %s. 正在上传到 GitHub 目录: %s...\n", cat, safeCat)
-			
+
 			// 构建上传路径: GitHubDir / 类别 / 文件名
 			fname := strconv.Itoa(classMap[cat]) + filepath.Ext(filePath)
 			uploadPath := filepath.Join(config.Dir, safeCat, fname)
-			
+
 			err = saveFileLocally(filePath, uploadPath)
 			if err != nil {
 				log.Printf("  -> 上传图片 %s 到 GitHub/%s 失败: %v", file.Name(), safeCat, err)
@@ -158,6 +189,12 @@ func ClassifyAndUpload(cfg Config) {
 				classMap[cat]++
 				fmt.Printf("  -> 上传成功: %s\n", uploadPath)
 			}
+		}
+
+		// 记录已处理的文件
+		processedFiles[file.Name()] = true
+		if err := saveProgress(progressFile, processedFiles); err != nil {
+			log.Printf("警告：保存进度失败: %v", err)
 		}
 	}
 	fmt.Println("\n--- 所有文件处理完毕 ---")
@@ -169,30 +206,29 @@ func classifyImageWithModel(ctx context.Context, imageContent []byte, content st
 		log.Println("create client fail", "err", err)
 		return nil, 0, err
 	}
-	
+
 	contentPrompt := content
 	parts := []*genai.Part{
 		genai.NewPartFromBytes(imageContent, "image/"+DetectImageFormat(imageContent)),
 		genai.NewPartFromText(contentPrompt),
 	}
-	
+
 	contents := []*genai.Content{
 		genai.NewContentFromParts(parts, genai.RoleUser),
 	}
-	
+
 	result, err := client.Models.GenerateContent(
 		ctx,
 		config.ModelName,
 		contents,
 		nil,
 	)
-	
+
 	if err != nil || result == nil {
 		log.Println("generate text fail", "err", err)
 		return nil, 0, err
 	}
-	
-	time.Sleep(time.Duration(config.IntervalSeconds) * time.Second)
+
 	if result.Text() != "" {
 		matches := cateRegex.FindAllString(result.Text(), -1)
 		cateRes := new(CateInfo)
@@ -204,9 +240,9 @@ func classifyImageWithModel(ctx context.Context, imageContent []byte, content st
 		}
 		return cateRes.Cate, int(result.UsageMetadata.TotalTokenCount), nil
 	}
-	
+
 	return nil, int(result.UsageMetadata.TotalTokenCount), nil
-	
+
 }
 
 func saveFileLocally(filePath, localTargetPath string) error {
@@ -221,14 +257,14 @@ func saveFileLocally(filePath, localTargetPath string) error {
 	} else if err != nil {
 		return fmt.Errorf("检查目标目录状态失败: %s, 错误: %w", targetDir, err)
 	}
-	
+
 	// 2. 打开源文件
 	sourceFile, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("打开源文件失败: %w", err)
 	}
 	defer sourceFile.Close() // 确保文件句柄在使用完毕后关闭
-	
+
 	// 3. 创建或截断目标文件
 	// os.Create 会创建一个新文件。如果文件已存在，它会截断（清空）它。
 	destinationFile, err := os.Create(localTargetPath)
@@ -236,24 +272,24 @@ func saveFileLocally(filePath, localTargetPath string) error {
 		return fmt.Errorf("创建目标文件失败: %w", err)
 	}
 	defer destinationFile.Close() // 确保文件句柄在使用完毕后关闭
-	
+
 	// 4. 复制文件内容
 	// io.Copy 会高效地将源文件的内容复制到目标文件
 	bytesCopied, err := io.Copy(destinationFile, sourceFile)
 	if err != nil {
 		return fmt.Errorf("复制文件内容失败: %w", err)
 	}
-	
+
 	// 可选：打印日志确认
 	fmt.Printf("成功将文件 '%s' 复制到 '%s' (%d bytes)\n", filepath.Base(filePath), localTargetPath, bytesCopied)
-	
+
 	return nil
 }
 
 // isImageFile 简单的图片文件后缀检查
 func isImageFile(filename string) bool {
 	ext := strings.ToLower(filepath.Ext(filename))
-	return ext == ".jpg" || ext == ".jpeg" || ext == ".png"
+	return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".webp"
 }
 
 // sanitizeCategory 清理类别名称，使其适用于文件路径
@@ -266,7 +302,7 @@ func sanitizeCategory(cat string) string {
 		}
 		return '_'
 	}, cat)
-	
+
 	sanitized = strings.ReplaceAll(sanitized, " ", "_")
 	return strings.Trim(sanitized, "_")
 }
@@ -278,12 +314,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("读取配置文件失败: %v", err)
 	}
-	
+
 	err = json.Unmarshal(confData, &config)
 	if err != nil {
 		log.Fatalf("解析配置文件失败: %v", err)
 	}
-	
+
 	classes := strings.Split(config.TargetClasses, ",")
 	idx := strings.Split(config.ClassIdx, ",")
 	for i, class := range classes {
@@ -294,7 +330,7 @@ func main() {
 			classMap[class] = 0
 		}
 	}
-	
+
 	ClassifyAndUpload(config)
 }
 
@@ -316,7 +352,7 @@ func GetGeminiClient(ctx context.Context) (*genai.Client, error) {
 
 func GetLLMProxyClient() *http.Client {
 	transport := &http.Transport{}
-	
+
 	if config.ProxyURL != "" {
 		proxy, err := url.Parse(config.ProxyURL)
 		if err != nil {
@@ -324,7 +360,7 @@ func GetLLMProxyClient() *http.Client {
 		}
 		transport.Proxy = http.ProxyURL(proxy)
 	}
-	
+
 	return &http.Client{
 		Transport: transport,
 		Timeout:   5 * time.Minute, // 设置超时
@@ -335,7 +371,7 @@ func DetectImageFormat(data []byte) string {
 	if len(data) < 12 {
 		return "unknown"
 	}
-	
+
 	switch {
 	case bytes.HasPrefix(data, []byte{0xFF, 0xD8, 0xFF}):
 		return "jpeg"
@@ -350,4 +386,46 @@ func DetectImageFormat(data []byte) string {
 	default:
 		return "unknown"
 	}
+}
+
+// loadProgress 从文件中加载已处理的文件列表
+func loadProgress(file string) (map[string]bool, error) {
+	processed := make(map[string]bool)
+	if _, err := os.Stat(file); os.IsNotExist(err) {
+		return processed, nil // 文件不存在，返回空的map
+	}
+
+	data, err := ioutil.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+
+	var fileList []string
+	if err := json.Unmarshal(data, &fileList); err != nil {
+		// 如果文件为空或格式不正确，也返回空map
+		if err == io.EOF || len(data) == 0 {
+			return processed, nil
+		}
+		return nil, err
+	}
+
+	for _, f := range fileList {
+		processed[f] = true
+	}
+	return processed, nil
+}
+
+// saveProgress 将已处理的文件列表保存到文件
+func saveProgress(file string, processed map[string]bool) error {
+	var fileList []string
+	for f := range processed {
+		fileList = append(fileList, f)
+	}
+
+	data, err := json.MarshalIndent(fileList, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return ioutil.WriteFile(file, data, 0644)
 }

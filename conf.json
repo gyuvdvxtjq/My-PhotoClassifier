@@ -1,12 +1,13 @@
 {
-  "image_folder": "./tmp",
-  "model_token": "xxx",
-  "llm_type": "gemini",
-  "model_custom_url": "",
+  "image_folder": "./input_images",
+  "model_token": "sk-fvlyVLWZJhLUILHSMLBJ9Ujz3kulmPEJO5PoI75Tub9pTeJY",
+  "llm_type": "openai",
+  "model_custom_url": "https://new.123nhh.xyz",
   "dir": "photos",
-  "target_classes": "萝莉,JK,御姐,自拍,表情包,性感",
-  "model_name": "gemini-2.0-flash",
-  "proxy_url": "http://127.0.0.1:7890",
-  "class_idx": "0,0,0,0,0,0",
-  "interval_seconds": 3,
+  "target_classes": "jk,自拍,性感,萝莉,表情包,制服,黑丝,白丝,玉足",
+  "model_name": "gemini-2.5-flash",
+  "proxy_url": "",
+  "class_idx": "",
+  "rate_limit_count": 30,
+  "rate_limit_duration_minutes": 5
 }

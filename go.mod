@@ -2,7 +2,10 @@ module github.com/yincongcyincong/PhotoClassifier
 
 go 1.25
 
-require google.golang.org/genai v1.35.0
+require (
+	golang.org/x/time v0.6.0
+	google.golang.org/genai v1.35.0
+)
 
 require (
 	cloud.google.com/go v0.116.0 // indirect
